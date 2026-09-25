@@ -617,16 +617,16 @@ export default function (pi: ExtensionAPI) {
     if (event.reason !== "threshold") return;
     const settings = event.preparation.settings;
     if (!settings || !settings.enabled) return;
-    if (
-      shouldSkipAutoCompaction({
-        modes,
-        messages: buildContextMessages(ctx),
-        opts,
-        contextWindow: ctx.model?.contextWindow ?? 0,
-        reserveTokens: settings.reserveTokens ?? 16384,
-        model: ctx.model as unknown as ModelLike,
-      })
-    ) {
+    const msgs = buildContextMessages(ctx);
+    const est = shouldSkipAutoCompaction({
+      modes,
+      messages: msgs,
+      opts,
+      contextWindow: ctx.model?.contextWindow ?? 0,
+      reserveTokens: settings.reserveTokens ?? 16384,
+      model: ctx.model as unknown as ModelLike,
+    });
+    if (est) {
       ctx.ui.notify("pi-shake: skipped auto-compaction — shaken history fits", "info");
       return { cancel: true };
     }
@@ -678,6 +678,19 @@ export default function (pi: ExtensionAPI) {
 
     // Normalize state: exactly one pi-shake entry, chained onto the current leaf.
     const withoutState = rebuilt.filter((e) => !(e.type === "custom" && e.customType === STATE_TYPE));
+    // Index the real (non-state) entries and find their leaf — the last
+    // entry that is not a parent of any other. The new state entry chains
+    // onto this real leaf (never onto an old state entry, which is filtered
+    // out of the file), so the branch stays connected and pi's projection
+    // is not left empty on a re-shake.
+    const byId = new Map<string, EntryLike>();
+    for (const e of withoutState) if (typeof e.id === "string") byId.set(e.id, e);
+    const hasParent = new Set<string>();
+    for (const e of withoutState) if (typeof e.parentId === "string") hasParent.add(e.parentId);
+    let realLeaf: EntryLike | undefined;
+    for (const e of withoutState) {
+      if (typeof e.id === "string" && !hasParent.has(e.id)) realLeaf = e;
+    }
     const usedIds = new Set<string>();
     for (const e of withoutState) if (typeof e.id === "string") usedIds.add(e.id);
     let stateId = "";
@@ -694,10 +707,39 @@ export default function (pi: ExtensionAPI) {
       customType: STATE_TYPE,
       data: { v: 1, modes: merged, opts },
       id: stateId,
-      parentId: ctx.sessionManager.getLeafId(),
+      parentId: realLeaf?.id ?? ctx.sessionManager.getLeafId(),
       timestamp: new Date().toISOString(),
     };
-
+    // pi's footer and the auto-compaction trigger both anchor to the last
+    // provider-reported assistant usage (totalTokens). Rewrite that anchor to
+    // the post-shake size (pre-anchor minus freed tokens) so the freed space
+    // shows up immediately and a stale anchor cannot trigger a spurious
+    // compaction that would wipe the now-small shaken history. The next real
+    // LLM call reports fresh usage and converges.
+    const preAnchor = ctx.getContextUsage()?.tokens ?? 0;
+    const freedTokens = estTokens(stats.toolChars + stats.bashChars + stats.blockChars + stats.thinkingChars);
+    const postAnchor = Math.max(0, preAnchor - freedTokens);
+    // The context branch excludes the pi-shake state entry (it is never sent
+    // to the LLM), so anchor from the leaf of withoutState — the real last
+    // message — and update that assistant's usage.
+    {
+      const branch: EntryLike[] = [];
+      let cur: EntryLike | undefined = realLeaf;
+      while (cur) {
+        branch.push(cur);
+        cur = typeof cur.parentId === "string" ? byId.get(cur.parentId) : undefined;
+      }
+      branch.reverse();
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const e = branch[i];
+        if (!e || e.type !== "message") continue;
+        const m = e.message as { role?: string; usage?: { totalTokens?: number } } | undefined;
+        if (m && m.role === "assistant" && m.usage) {
+          m.usage = { ...m.usage, totalTokens: postAnchor };
+          break;
+        }
+      }
+    }
     const tmp = `${file}.tmp-${process.pid}`;
     try {
       writeFileSync(tmp, [...withoutState, stateEntry].map((e) => `${JSON.stringify(e)}\n`).join(""));
@@ -711,9 +753,9 @@ export default function (pi: ExtensionAPI) {
     const kb = Math.round((stats.imageBytes * 0.75) / 1024);
     const parts: string[] = [`~${fmt(textTokens)} tokens freed`];
     if (stats.imageCount > 0) parts.push(`${stats.imageCount} image(s) removed (~${fmt(kb)} KB)`);
-    // pi's footer anchors context usage to the last provider-reported call,
-    // so the freed space shows up there after the next LLM call.
-    const doneText = `shook history: ${parts.join(" · ")} — footer usage refreshes on the next LLM call`;
+    // The anchor (last assistant totalTokens) was rewritten above to the
+    // post-shake size, so the footer reflects the freed space immediately.
+    const doneText = `shook history: ${parts.join(" · ")}`;
 
     // Re-read the rebuilt file into the live session manager (public API;
     // the ReadonlySessionManager type on ctx merely hides it). No session

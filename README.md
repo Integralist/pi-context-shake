@@ -3,9 +3,9 @@
 A [pi](https://pi.dev) extension that frees context space by shaking heavy content
 (tool output, images, thinking) out of the session history — like omp's `/shake`,
 but for vanilla pi. It **rebuilds the session in place**: the session's `.jsonl`
-file is rewritten atomically and pi reopens it (same code path as `/resume`), so
-the persisted history, the transcript, and the in-memory agent state all reflect
-the shaken history.
+file is rewritten atomically and re-read by the running session manager, so the
+persisted history and the transcript are the shaken version (and any later
+`/resume` opens it). A `context` hook keeps the live LLM payload shaken.
 
 ## Commands
 
