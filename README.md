@@ -11,7 +11,8 @@ persisted history and the transcript are the shaken version (and any later
 
 | Command | Effect |
 |---|---|
-| `/shake` | Status: shaken modes, context usage, what can be removed |
+| `/shake` | Status: shaken modes, context usage, what can be removed (auto-hides on your next prompt) |
+| `/shake hide` | Hide the status panel |
 | `/shake tools` | Elide big tool results / bash output / long text blocks in history |
 | `/shake images` | Replace image blocks in history with one-line placeholders |
 | `/shake thinking` | Drop thinking/reasoning blocks from history |

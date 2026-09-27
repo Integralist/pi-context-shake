@@ -1,7 +1,7 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
-import { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import shakeExtension, { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
 
 const opts: ShakeOptions = { toolThreshold: 2000, blockThreshold: 12000, toolHead: 200, blockHead: 500 };
@@ -357,5 +357,44 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
   check("never skip when modes off", shouldSkipAutoCompaction({ modes: { tools: false, images: false, thinking: false }, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
   check("never skip with no context window", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: 0, reserveTokens: reserve, model: undefined }) === false);
 }
+// --- Scenario 14: status widget can be hidden ------------------------------
+{
+  type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const fakePi = {
+    on: (name: string, h: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), h]),
+    registerCommand: (_name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
+      command = def.handler;
+    },
+  };
+  shakeExtension(fakePi as never);
+
+  const widgets = new Map<string, string[] | undefined>();
+  const ctx = {
+    hasUI: true,
+    model: undefined,
+    ui: {
+      setWidget: (key: string, lines: string[] | undefined) => widgets.set(key, lines),
+      notify: () => {},
+    },
+    sessionManager: { getEntries: () => [] },
+    getContextUsage: () => undefined,
+  };
+  const emit = async (name: string, event: unknown) => {
+    for (const h of handlers.get(name) ?? []) await h(event, ctx);
+  };
+
+  await command?.("", ctx);
+  check("/shake shows the status widget", Array.isArray(widgets.get("pi-shake")));
+
+  await command?.("hide", ctx);
+  check("/shake hide clears the status widget", widgets.get("pi-shake") === undefined);
+
+  await command?.("", ctx);
+  await emit("input", { type: "input", text: "next prompt", source: "interactive" });
+  check("next prompt auto-hides the status widget", widgets.get("pi-shake") === undefined);
+}
+
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -3,6 +3,8 @@
  *
  * Commands:
  *   /shake              status: shaken modes, context usage, what can be removed
+ *                       (widget auto-hides on the next prompt)
+ *   /shake hide         hide the status widget
  *   /shake tools        rebuild history in place: elide big tool results,
  *                       bash output, and long text blocks
  *   /shake images       rebuild history in place: replace image blocks with
@@ -124,7 +126,8 @@ const DEFAULT_OPTIONS: ShakeOptions = {
   toolHead: 200,
   blockHead: 500,
 };
-const KINDS = ["tools", "images", "thinking", "all"] as const;
+const KINDS = ["tools", "images", "thinking", "all", "hide"] as const;
+const WIDGET_KEY = "pi-shake";
 type ModelLike = { api?: string; compat?: { supportsMidConvoEffort?: boolean } } | undefined;
 
 const estTokens = (chars: number): number => Math.max(0, Math.round(chars / 4));
@@ -563,8 +566,21 @@ export default function (pi: ExtensionAPI) {
   let modes: ShakeModes = { tools: false, images: false, thinking: false };
   let opts: ShakeOptions = { ...DEFAULT_OPTIONS };
 
+  const hideStatus = (ctx: ExtensionContext): void => {
+    if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
+  };
+
+  // Auto-hide the /shake status widget when the user sends their next prompt.
+  // Extension commands (incl. /shake itself) skip the `input` event, so this
+  // only fires for real prompts.
+  pi.on("input", async (_event, ctx) => {
+    hideStatus(ctx);
+    return { action: "continue" };
+  });
+
   // Reconstruct shaken-modes from the session (last pi-shake entry wins).
   pi.on("session_start", async (_event, ctx) => {
+    hideStatus(ctx);
     modes = { tools: false, images: false, thinking: false };
     opts = { ...DEFAULT_OPTIONS };
     for (const entry of ctx.sessionManager.getEntries()) {
@@ -770,6 +786,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     modes = merged;
+    hideStatus(ctx); // the status numbers are out of date after a rebuild
     ctx.ui.notify(doneText, "info");
   };
   const showStatus = (ctx: ExtensionCommandContext): void => {
@@ -794,9 +811,9 @@ export default function (pi: ExtensionAPI) {
     if (model?.api === "anthropic-messages" && !canDropSignedThinking(model)) {
       lines.push("note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history");
     }
-    lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place");
+    lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place · /shake hide");
     if (ctx.hasUI) {
-      ctx.ui.setWidget("pi-shake", lines);
+      ctx.ui.setWidget(WIDGET_KEY, lines);
       ctx.ui.notify(lines[0] ?? "", "info");
     } else {
       ctx.ui.notify(lines.join(" | "), "info");
@@ -814,6 +831,10 @@ export default function (pi: ExtensionAPI) {
       const kind = (args ?? "").trim().toLowerCase();
       if (kind === "") {
         showStatus(ctx);
+        return;
+      }
+      if (kind === "hide") {
+        hideStatus(ctx);
         return;
       }
       if ((KINDS as readonly string[]).includes(kind)) {
