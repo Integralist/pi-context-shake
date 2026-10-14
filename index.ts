@@ -37,11 +37,10 @@
  *   gone from the file) — the pre-shake history survives in any fork made
  *   before the shake.
  *
- *   Thinking safety: Anthropic requires signed thinking blocks in replayed
- *   history. Signed/redacted thinking is only dropped when the active model
- *   is not anthropic-messages, or when pi sends the thinking-binding-controls
- *   beta (model with supportsMidConvoEffort). Otherwise it is kept and a note
- *   is shown in /shake status.
+ *   Thinking safety: signed/redacted thinking is kept for virtual or unknown
+ *   targets. Known physical models retain the established Anthropic policy:
+ *   only drop signed thinking with supportsMidConvoEffort, or on another API.
+ *   /shake status explains when signed thinking is kept.
  */
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -489,18 +488,18 @@ export function rebuildEntries(
 
 /**
  * Signed thinking blocks (Anthropic) must normally be replayed verbatim in
- * multi-turn requests. Dropping them is only safe when the active model is
- * not anthropic-messages, or when pi sends the thinking-binding-controls
- * beta (supportsMidConvoEffort), which makes the API drop invalid thinking
- * instead of rejecting the request.
+ * multi-turn requests. A virtual selection or missing API cannot establish
+ * the next physical target's replay requirements. For known physical APIs,
+ * keep the established non-Anthropic / thinking-binding-controls policy.
  */
 export function canDropSignedThinking(model: ModelLike): boolean {
-  if (!model || model.api !== "anthropic-messages") return true;
+  if (!model?.api || model.api === "pi-virtual") return false;
+  if (model.api !== "anthropic-messages") return true;
   return model.compat?.supportsMidConvoEffort === true;
 }
 
-/** Headroom for the system prompt + tool schemas, which the per-message
- *  estimate does not count but the provider will bill. */
+/** Extra headroom for request-time system prompt + tool overhead beyond
+ *  the persisted messages included in the estimate. */
 const SYSTEM_PROMPT_MARGIN = 8192;
 
 /**
@@ -526,6 +525,17 @@ export function estimateMessageTokens(messages: ShakeMessage[]): number {
           chars += (b.name ?? "").length + JSON.stringify(b.arguments ?? {}).length;
         }
       }
+    }
+    if ((msg.role === "branchSummary" || msg.role === "compactionSummary") && typeof msg.summary === "string") {
+      chars += msg.summary.length;
+    }
+    if (msg.role === "system") {
+      if (msg.sections && typeof msg.sections === "object") {
+        for (const section of Object.values(msg.sections)) {
+          if (typeof section === "string") chars += section.length;
+        }
+      }
+      if (Array.isArray(msg.toolsAdded)) chars += JSON.stringify(msg.toolsAdded).length;
     }
     if (msg.role === "bashExecution" && typeof msg.output === "string") {
       const command = typeof msg.command === "string" ? msg.command.length : 0;
@@ -608,6 +618,14 @@ export default function (pi: ExtensionAPI) {
 
   // Map the session's context entries to the messages the LLM would see.
   const buildContextMessages = (ctx: ExtensionContext): ShakeMessage[] => {
+    // Current Pi projects context edits and compaction system checkpoints.
+    // Older physical hosts only expose the existing entry-based path below.
+    const manager = ctx.sessionManager as typeof ctx.sessionManager & {
+      buildSessionProjection?: () => { messages: unknown[] };
+    };
+    if (typeof manager.buildSessionProjection === "function") {
+      return manager.buildSessionProjection().messages as ShakeMessage[];
+    }
     const out: ShakeMessage[] = [];
     for (const entry of ctx.sessionManager.buildContextEntries()) {
       if (entry.type === "message") {
@@ -633,6 +651,9 @@ export default function (pi: ExtensionAPI) {
     if (event.reason !== "threshold") return;
     const settings = event.preparation.settings;
     if (!settings || !settings.enabled) return;
+    // A virtual window (or even its last physical response's window) does not
+    // prove the next route's limit. Let Pi perform its request-time checks.
+    if (!ctx.model?.api || ctx.model.api === "pi-virtual") return;
     const msgs = buildContextMessages(ctx);
     const est = shouldSkipAutoCompaction({
       modes,
@@ -808,8 +829,10 @@ export default function (pi: ExtensionAPI) {
       `removable now: ~${fmt(toolTok)} tokens tool/bash (${stats.toolCount}) · ~${fmt(blockTok)} tokens long text (${stats.blockCount})` +
         ` · ${stats.imageCount} images (~${fmt(kb)} KB) · ~${fmt(thinkTok)} tokens thinking (${stats.thinkingCount})`,
     );
-    if (model?.api === "anthropic-messages" && !canDropSignedThinking(model)) {
-      lines.push("note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history");
+    if (!canDropSignedThinking(model)) {
+      lines.push(model?.api === "anthropic-messages"
+        ? "note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history"
+        : "note: signed thinking kept — the next physical target's replay requirements are unknown");
     }
     lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place · /shake hide");
     if (ctx.hasUI) {
