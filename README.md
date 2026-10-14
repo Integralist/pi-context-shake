@@ -9,14 +9,14 @@ persisted history and the transcript are the shaken version (and any later
 
 ## Commands
 
-| Command | Effect |
-|---|---|
-| `/shake` | Status: shaken modes, context usage, what can be removed (auto-hides on your next prompt) |
-| `/shake hide` | Hide the status panel |
-| `/shake tools` | Elide big tool results / bash output / long text blocks in history |
-| `/shake images` | Replace image blocks in history with one-line placeholders |
-| `/shake thinking` | Drop thinking/reasoning blocks from history |
-| `/shake all` | All of the above in one rebuild |
+| Command           | Effect                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `/shake`          | Status: shaken modes, context usage, what can be removed (auto-hides on your next prompt) |
+| `/shake hide`     | Hide the status panel                                                                     |
+| `/shake tools`    | Elide big tool results / bash output / long text blocks in history                        |
+| `/shake images`   | Replace image blocks in history with one-line placeholders                                |
+| `/shake thinking` | Drop thinking/reasoning blocks from history                                               |
+| `/shake all`      | All of the above in one rebuild                                                           |
 
 Thresholds (chars ≈ tokens/4): tool results / bash output > **2,000** chars become
 a one-line placeholder with a 200-char head preview; text blocks > **12,000**
@@ -53,17 +53,27 @@ compaction even though the shaken history now fits. The extension listens to
 history is small enough to fit (estimating what the `context` hook will
 actually send, plus headroom for the system prompt + tools). This prevents the
 compaction→shake→compaction loop. Manual `/compact` and overflow recovery are
-never blocked.
+never blocked. With a virtual selection or an unknown model API, the extension
+does not cancel compaction: the next physical target and its context limit are
+not known. Pi performs its own request-time limit checks. On Pi 1.2.0, the
+physical-model estimate uses Pi's canonical projected messages, including
+context edits, retained history, summaries, and compaction system checkpoints.
+Older physical SDKs retain the entry-based estimate.
 
 Elision is **irreversible for the shaken session** — the original bytes are
 gone from the file. If you might want them back, make a fork (`/tree`) before
 shaking; forks made before the shake keep the full history.
 
-**Thinking safety:** Anthropic requires signed thinking blocks in replayed
-history. Signed/redacted thinking is only dropped when the active model is not
-`anthropic-messages`, or when pi sends the `thinking-binding-controls` beta
-(model with `supportsMidConvoEffort`). Otherwise it is kept and `/shake` status
-notes it.
+**Thinking safety:** With a virtual selection or an unknown model API,
+signed/redacted thinking is preserved, even after a successful physical
+response. A later request can route elsewhere. Unsigned thinking, tool output,
+images, and long text can still be shaken; `/shake` status excludes retained
+thinking from its removal estimate and explains why it is kept.
+
+For a known physical model, the existing policy is unchanged: signed/redacted
+thinking is dropped on non-`anthropic-messages` APIs, or when pi sends the
+`thinking-binding-controls` beta (`supportsMidConvoEffort`). Otherwise it is
+kept for Anthropic replay.
 
 ## Install
 
@@ -85,5 +95,21 @@ Uninstall with `pi remove npm:pi-context-shake`.
 ```sh
 bun install
 bunx tsc --noEmit   # typecheck against @earendil-works/pi-coding-agent
-bun test.ts         # engine unit tests (message-level + entry-level rebuild)
+bun --no-env-file test.ts # engine tests and offline callers on the local SDK
 ```
+
+To exercise an already-installed Pi 1.2.0 SDK without changing development
+pins, set `CURRENT_SDK_ROOT` to its `pi-coding-agent` package directory. Its
+sibling `pi-ai` package must come from the same installation:
+
+```sh
+CURRENT_SDK_ROOT=/path/to/node_modules/@earendil-works/pi-coding-agent \
+  bun --no-env-file test.ts
+```
+
+Offline tests cover physical callers on Pi 0.85.1 and 1.2.0, plus synthetic
+native routing and canonical context projection on 1.2.0. No Auto extension is
+required. Native-only checks are explicitly skipped with Pi 0.85.1. The tests
+use in-memory credentials and faux providers; they do not prove live-provider
+signature acceptance, entitlement, or installation compatibility with other SDK
+versions.
