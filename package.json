@@ -17,7 +17,8 @@
     "url": "https://github.com/corrm/pi-context-shake"
   },
   "files": [
-    "index.ts"
+    "index.ts",
+    "auto-recovery.ts"
   ],
   "pi": {
     "extensions": ["./index.ts"]
@@ -26,7 +27,8 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun --no-env-file test.ts && bun test auto-recovery.test.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

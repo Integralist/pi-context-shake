@@ -46,6 +46,7 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createAutoRecovery } from "./auto-recovery.ts";
 
 // ---------------------------------------------------------------------------
 // Local structural types — only the type imports above are erased at load.
@@ -125,7 +126,7 @@ const DEFAULT_OPTIONS: ShakeOptions = {
   toolHead: 200,
   blockHead: 500,
 };
-const KINDS = ["tools", "images", "thinking", "all", "hide"] as const;
+const KINDS = ["tools", "images", "thinking", "all", "hide", "auto"] as const;
 const WIDGET_KEY = "pi-shake";
 type ModelLike = { api?: string; compat?: { supportsMidConvoEffort?: boolean } } | undefined;
 
@@ -575,6 +576,8 @@ export function shouldSkipAutoCompaction(args: {
 export default function (pi: ExtensionAPI) {
   let modes: ShakeModes = { tools: false, images: false, thinking: false };
   let opts: ShakeOptions = { ...DEFAULT_OPTIONS };
+  const auto = createAutoRecovery(pi, (ctx) =>
+    rebuildHistory(ctx, { tools: true, images: true, thinking: true }));
 
   const hideStatus = (ctx: ExtensionContext): void => {
     if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
@@ -675,15 +678,15 @@ export default function (pi: ExtensionAPI) {
     return rebuildEntries(entries, opts, wanted, canDropSignedThinking(model)).stats;
   };
 
-  const rebuildHistory = async (ctx: ExtensionCommandContext, wanted: ShakeModes): Promise<void> => {
+  const rebuildHistory = async (ctx: ExtensionCommandContext, wanted: ShakeModes): Promise<boolean> => {
     if (!ctx.isIdle()) {
       ctx.ui.notify("shake: wait for the agent to finish before rebuilding history", "warning");
-      return;
+      return false;
     }
     const file = ctx.sessionManager.getSessionFile();
     if (!file) {
       ctx.ui.notify("shake: session is not saved to disk (ephemeral)", "error");
-      return;
+      return false;
     }
 
     let lines: string[];
@@ -691,21 +694,21 @@ export default function (pi: ExtensionAPI) {
       lines = readFileSync(file, "utf8").split("\n").filter((l) => l.trim().length > 0);
     } catch (err) {
       ctx.ui.notify(`shake: cannot read session file: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return;
+      return false;
     }
     let entries: EntryLike[];
     try {
       entries = lines.map((l) => JSON.parse(l) as EntryLike);
     } catch (err) {
       ctx.ui.notify(`shake: session file has unparseable lines: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return;
+      return false;
     }
 
     const model = ctx.model as unknown as ModelLike;
     const { entries: rebuilt, stats } = rebuildEntries(entries, opts, wanted, canDropSignedThinking(model));
     if (freedChars(stats) === 0) {
       ctx.ui.notify("Nothing to shake in history.", "info");
-      return;
+      return false;
     }
     const merged: ShakeModes = {
       tools: modes.tools || wanted.tools,
@@ -714,7 +717,23 @@ export default function (pi: ExtensionAPI) {
     };
 
     // Normalize state: exactly one pi-shake entry, chained onto the current leaf.
-    const withoutState = rebuilt.filter((e) => !(e.type === "custom" && e.customType === STATE_TYPE));
+    const previousStates = new Map(rebuilt
+      .filter((e) => e.type === "custom" && e.customType === STATE_TYPE && typeof e.id === "string")
+      .map((e) => [e.id as string, e]));
+    const nonStateParent = (id: unknown): string | null => {
+      const visited = new Set<string>();
+      while (typeof id === "string" && previousStates.has(id)) {
+        if (visited.has(id)) return null;
+        visited.add(id);
+        id = previousStates.get(id)?.parentId;
+      }
+      return typeof id === "string" ? id : null;
+    };
+    // Children of an old state entry must reconnect before that entry is removed.
+    const withoutState = rebuilt
+      .filter((e) => !(e.type === "custom" && e.customType === STATE_TYPE))
+      .map((e) => typeof e.parentId === "string" && previousStates.has(e.parentId)
+        ? { ...e, parentId: nonStateParent(e.parentId) } : e);
     // Index the real (non-state) entries and find their leaf — the last
     // entry that is not a parent of any other. The new state entry chains
     // onto this real leaf (never onto an old state entry, which is filtered
@@ -724,9 +743,11 @@ export default function (pi: ExtensionAPI) {
     for (const e of withoutState) if (typeof e.id === "string") byId.set(e.id, e);
     const hasParent = new Set<string>();
     for (const e of withoutState) if (typeof e.parentId === "string") hasParent.add(e.parentId);
-    let realLeaf: EntryLike | undefined;
-    for (const e of withoutState) {
-      if (typeof e.id === "string" && !hasParent.has(e.id)) realLeaf = e;
+    let realLeaf = byId.get(nonStateParent(ctx.sessionManager.getLeafId()) ?? "");
+    if (!realLeaf) {
+      for (const e of withoutState) {
+        if (typeof e.id === "string" && !hasParent.has(e.id)) realLeaf = e;
+      }
     }
     const usedIds = new Set<string>();
     for (const e of withoutState) if (typeof e.id === "string") usedIds.add(e.id);
@@ -737,7 +758,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (!stateId) {
       ctx.ui.notify("shake: could not allocate a unique entry id", "error");
-      return;
+      return false;
     }
     const stateEntry: EntryLike = {
       type: "custom",
@@ -779,11 +800,12 @@ export default function (pi: ExtensionAPI) {
     }
     const tmp = `${file}.tmp-${process.pid}`;
     try {
-      writeFileSync(tmp, [...withoutState, stateEntry].map((e) => `${JSON.stringify(e)}\n`).join(""));
+      writeFileSync(tmp, [...withoutState, stateEntry].map((e) => `${JSON.stringify(e)}\n`).join(""),
+        { flag: "wx", mode: 0o600 });
       renameSync(tmp, file);
     } catch (err) {
       ctx.ui.notify(`shake: failed to rewrite session file: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return;
+      return false;
     }
 
     const textTokens = estTokens(stats.toolChars + stats.bashChars + stats.blockChars + stats.thinkingChars);
@@ -803,12 +825,13 @@ export default function (pi: ExtensionAPI) {
       liveManager.setSessionFile(file);
     } catch (err) {
       ctx.ui.notify(`shake: history rebuilt on disk, in-memory re-read failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return;
+      return false;
     }
 
     modes = merged;
     hideStatus(ctx); // the status numbers are out of date after a rebuild
     ctx.ui.notify(doneText, "info");
+    return true;
   };
   const showStatus = (ctx: ExtensionCommandContext): void => {
     const model = ctx.model as unknown as ModelLike;
@@ -834,6 +857,7 @@ export default function (pi: ExtensionAPI) {
         ? "note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history"
         : "note: signed thinking kept — the next physical target's replay requirements are unknown");
     }
+    lines.push("auto: " + auto.status() + " · /shake auto on|off|status");
     lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place · /shake hide");
     if (ctx.hasUI) {
       ctx.ui.setWidget(WIDGET_KEY, lines);
@@ -852,6 +876,10 @@ export default function (pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       const kind = (args ?? "").trim().toLowerCase();
+      if (kind === "auto" || kind.startsWith("auto ")) {
+        await auto.command(kind.slice(4).trim(), ctx);
+        return;
+      }
       if (kind === "") {
         showStatus(ctx);
         return;

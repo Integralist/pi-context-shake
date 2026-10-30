@@ -4,7 +4,7 @@
  */
 import shakeExtension, { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -469,7 +469,9 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 {
   const sdkRoot = process.env.CURRENT_SDK_ROOT ?? dirname(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
   const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
-  const ai = await import(pathToFileURL(join(dirname(sdkRoot), "pi-ai/dist/index.js")).href);
+  const nestedAI = join(sdkRoot, "node_modules/@earendil-works/pi-ai/dist/index.js");
+  const ai = await import(pathToFileURL(existsSync(nestedAI) ? nestedAI :
+    join(dirname(sdkRoot), "pi-ai/dist/index.js")).href);
   const version = JSON.parse(readFileSync(join(sdkRoot, "package.json"), "utf8")).version;
   console.log(`\nSDK host: ${version} (${sdkRoot})`);
   const all = { tools: true, images: true, thinking: true };
