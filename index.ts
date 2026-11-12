@@ -680,7 +680,7 @@ export default function (pi: ExtensionAPI) {
 
   const rebuildHistory = async (ctx: ExtensionCommandContext, wanted: ShakeModes): Promise<boolean> => {
     if (!ctx.isIdle()) {
-      ctx.ui.notify("shake: wait for the agent to finish before rebuilding history", "warning");
+      ctx.ui.notify("shake: nothing was queued. When the agent finishes, run the same /shake command again.", "warning");
       return false;
     }
     const file = ctx.sessionManager.getSessionFile();
